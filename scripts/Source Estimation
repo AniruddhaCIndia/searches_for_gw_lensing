@@ -1,3 +1,6 @@
+
+
+
 # just trying with source parameters , without lensed . From which we would get psi, which later can be used for best fit template
 
 
@@ -22,6 +25,14 @@ file_h1 = '/content/H-H1_GWOSC_O3b_4KHZ_R1-1265754112-4096.hdf5'
 file_l1 = '/content/L-L1_GWOSC_O3b_4KHZ_R1-1265754112-4096.hdf5'
 
 
+
+!wget https://dcc.ligo.org/public/0174/G2100674/001/O3-H1-C01_CLEAN_SUB60HZ-1262197260.0_sensitivity_strain_asd.txt -O H1_asd.txt
+!wget https://dcc.ligo.org/public/0174/G2100675/001/O3-L1-C01_CLEAN_SUB60HZ-1262141640.0_sensitivity_strain_asd.txt -O /content/L1_asd.txt
+
+asd_file_h1 = '/content/H1_asd.txt'
+asd_file_l1= '/content/L1_asd.txt'
+
+
 # Keep duration to 4 seconds and sample rate to 2048 to prevent Colab from crashing
 duration = 4.0
 sampling_frequency = 2048
@@ -31,15 +42,53 @@ h1_ts = TimeSeries.read(file_h1, format='hdf5.gwosc').crop(gps_time-2, gps_time+
 l1_ts = TimeSeries.read(file_l1, format='hdf5.gwosc').crop(gps_time-2, gps_time+2).resample(sampling_frequency)
 
 
-# Create Interferometer objects
+
+
+
+
+
+asd_data_h = np.loadtxt(asd_file_h1,skiprows=1)
+asd_data_l = np.loadtxt(asd_file_l1,skiprows=1)
+
+
+freq_h = asd_data_h[:,0]
+freq_l = asd_data_l[:,0]
+H1_psd = asd_data_h[:,1] **2
+L1_psd = asd_data_l[:,1] **2
+
+plt.loglog(freq_h, H1_psd)
+
+# %%
+H1 = bilby.gw.detector.get_empty_interferometer("H1")
+L1 = bilby.gw.detector.get_empty_interferometer("L1")
+
+
+
+# %%
+H1.power_spectral_density = bilby.gw.detector.PowerSpectralDensity(
+    frequency_array=freq_h, psd_array=H1_psd)
+L1.power_spectral_density = bilby.gw.detector.PowerSpectralDensity(
+    frequency_array=freq_l, psd_array=L1_psd)
+
+H1.minimum_frequency = 20
+L1.minimum_frequency = 20
+
+H1.maximum_frequency = 448
+L1.maximum_frequency = 448
+
+
+
+
+
+
+
 ifos = bilby.gw.detector.InterferometerList(['H1', 'L1'])
 ifos[0].set_strain_data_from_gwpy_timeseries(h1_ts)
 ifos[1].set_strain_data_from_gwpy_timeseries(l1_ts)
-
-# Set the frequency boundaries
 for ifo in ifos:
     ifo.minimum_frequency = 20.0
-    ifo.maximum_frequency = 448.0
+    ifo.maximum_frequency = 448.0 # Max freq set to avoid high-frequency noise
+
 
 print(f"RAM Usage after data load: {psutil.virtual_memory().percent}%")
 
@@ -85,8 +134,8 @@ result = bilby.run_sampler(
     likelihood=likelihood,
     priors=priors,
     sampler='dynesty',
-    nlive=200,       
-    dlogz=2.0,        
+    nlive=200,
+    dlogz=2.0,
     outdir=f'Source_PE_Event_{EVENT}',
     label=f'GW_Source_{EVENT}'
 )
