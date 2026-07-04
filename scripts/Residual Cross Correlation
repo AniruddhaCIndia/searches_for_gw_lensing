@@ -1,0 +1,184 @@
+# STEP 2 ,3, 4 - TOGETHER
+
+import sys
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import h5py
+from gwpy.timeseries import TimeSeries
+from pycbc.waveform import get_td_waveform
+from pycbc.detector import Detector
+
+
+sys.path.append('/content/glance')
+
+from glance import correlator
+
+
+gps_time = 1251009263.76
+
+file_path_H1 = '/content/H-H1_GWOSC_O3b_4KHZ_R1-1265754112-4096.hdf5'
+file_path_L1 = '/content/L-L1_GWOSC_O3b_4KHZ_R1-1265754112-4096.hdf5'
+
+
+
+
+
+
+
+
+
+posterior_path = '/content/GW190828_063405-PYCBC-POSTERIOR-IMRPhenomXPHM.hdf' 
+
+
+
+csv_path = '/content/GW_Lensing_B.csv' #   PE run for 'psi' - I NEED TO UPDATE THIS LINE AFTER PSI ESTIMATION
+
+
+
+
+
+data_H1 = TimeSeries.read(file_path_H1, format='hdf5.gwosc')
+data_L1 = TimeSeries.read(file_path_L1, format='hdf5.gwosc')
+
+# Crop to avoid wrap-around edge artifacts from the filter
+crop_H1 = data_H1.crop(gps_B - 16, gps_B + 2)
+crop_L1 = data_L1.crop(gps_B - 16, gps_B + 2)
+
+
+hp_H1 = crop_H1.highpass(20.0)
+hp_L1 = crop_L1.highpass(20.0)
+
+
+
+
+
+with h5py.File(posterior_path, 'r') as f:
+    samples = f['samples']
+    # Find the row with the maximum likelihood
+    maxL_idx_hdf = np.argmax(samples['loglikelihood'][:])
+
+    # Convert Source Masses to Detector Masses using redshift 
+    z = samples['redshift'][maxL_idx_hdf]
+    best_m1 = samples['srcmass1'][maxL_idx_hdf] * (1 + z)
+    best_m2 = samples['srcmass2'][maxL_idx_hdf] * (1 + z)
+    
+    distance_best = samples['distance'][maxL_idx_hdf]
+    ra_best = samples['ra'][maxL_idx_hdf]
+    dec_best = samples['dec'][maxL_idx_hdf]
+    phase_best = samples['coa_phase'][maxL_idx_hdf]
+    
+    # Calculate the exact earth-center arrival time
+    delta_tc = samples['delta_tc'][maxL_idx_hdf]
+    time_best = gps_B + delta_tc
+
+# psi from PE Run (CSV)
+try:
+    df = pd.read_csv(csv_path, delimiter=' ')
+except Exception:
+    df = pd.read_csv(csv_path, delimiter=',') # Fallback to comma
+
+maxL_idx_csv = df['log_likelihood'].idxmax()
+psi_best = df.loc[maxL_idx_csv, 'psi']
+
+print(f"-> Using Parameters: M1={best_m1:.2f}, M2={best_m2:.2f}, Dist={distance_best:.1f}Mpc")
+print(f"-> Using Sky Loc  : RA={ra_best:.4f}, DEC={dec_best:.4f}, Earth-Time={time_best:.4f}")
+print(f"-> Using Psi: {psi_best:.4f}")
+
+
+
+hp, hc = get_td_waveform(approximant="IMRPhenomXPHM",
+                         mass1=best_m1,
+                         mass2=best_m2,
+                         distance=distance_best,
+                         coa_phase=phase_best,
+                         delta_t=1.0/4096,
+                         f_lower=20.0)
+
+# Initialize Detector objects to calculate geographic arrival times
+det_h1 = Detector("H1")
+det_l1 = Detector("L1")
+
+
+# 1.  Antenna Patterns for H1
+fp_h1, fc_h1 = det_h1.antenna_pattern(ra_best, dec_best, psi_best, time_best)
+h1_projected = (fp_h1 * hp) + (fc_h1 * hc)
+h1_projected.resize(len(hp_H1))
+template_h1 = h1_projected.cyclic_time_shift(h1_projected.start_time).numpy()
+
+#  Light Travel Time to Hanford
+dt_h1 = det_h1.time_delay_from_earth_center(ra_best, dec_best, time_best)
+time_h1 = time_best + dt_h1
+print(f"H1 Arrival Time: {time_h1:.4f} (Delay: {dt_h1*1000:.2f} ms)")
+
+# Align and Subtract
+center_H1 = int((time_h1 - hp_H1.t0.value) * 4096)
+aligned_H1 = np.roll(template_h1, center_H1)
+res_H1_raw = hp_H1 - TimeSeries(aligned_H1, times=hp_H1.times)
+
+#  Antenna Patterns for L1
+fp_l1, fc_l1 = det_l1.antenna_pattern(ra_best, dec_best, psi_best, time_best)
+l1_projected = (fp_l1 * hp) + (fc_l1 * hc)
+l1_projected.resize(len(hp_L1))
+template_l1 = l1_projected.cyclic_time_shift(l1_projected.start_time).numpy()
+
+#  Light Travel Time to Livingston
+dt_l1 = det_l1.time_delay_from_earth_center(ra_best, dec_best, time_best)
+time_l1 = time_best + dt_l1
+print(f"L1 Arrival Time: {time_l1:.4f} (Delay: {dt_l1*1000:.2f} ms)")
+
+# Align and Subtract
+center_L1 = int((time_l1 - hp_L1.t0.value) * 4096)
+aligned_L1 = np.roll(template_l1, center_L1)
+res_L1_raw = hp_L1 - TimeSeries(aligned_L1, times=hp_L1.times)
+
+
+
+clean_H1 = res_H1_raw.whiten(fftlength=2, overlap=1, window='hann').bandpass(20, 512)
+clean_L1 = res_L1_raw.whiten(fftlength=2, overlap=1, window='hann').bandpass(20, 512)
+
+# Geometric time-delay alignment between the two residuals
+correlation = np.correlate(clean_H1.value, clean_L1.value, mode='full')
+lag = np.argmax(correlation) - (len(clean_L1.value) - 1)
+l1_aligned_array = np.roll(clean_L1.value, lag)
+clean_L1_aligned = TimeSeries(l1_aligned_array, times=clean_L1.times)
+
+
+final_B_H1 = clean_H1.crop(gps_B - 0.5, gps_B + 0.5)
+final_B_L1 = clean_L1_aligned.crop(gps_B - 0.5, gps_B + 0.5)
+
+
+
+steps = 16
+cc_time_B, cc_residual_data_B = correlator.cross_correlator(
+    final_B_H1.value, final_B_L1.value, time=final_B_H1.times.value, steps=steps, pearson=True
+)
+
+
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+
+
+ax1.plot(final_B_H1.times.value, final_B_H1.value, color='red', alpha=0.7, label="H1 Residual")
+ax1.plot(final_B_L1.times.value, final_B_L1.value, color='green', alpha=0.7, label="L1 Residual (Aligned)")
+ax1.set_title(r' Residuals ', fontsize=14, fontweight='bold')
+ax1.set_ylabel('Whitened Strain')
+ax1.axvline(gps_B, color='black', linestyle='--')
+ax1.legend(loc="upper left")
+
+
+ax2.plot(cc_time_B, cc_residual_data_B, color='purple', marker='o', linewidth=2, label="Residual Cross-Correlation")
+ax2.set_title(f'CROSS CORRELATION', fontsize=14, fontweight='bold')
+ax2.set_xlabel('GPS Time (s)', fontsize=12)
+ax2.set_ylabel('Correlation')
+ax2.axvline(gps_B, color='black', linestyle='--')
+ax2.grid(True, alpha=0.3)
+ax2.legend(loc="upper left")
+
+plt.tight_layout()
+plt.show()
+
+
+print(f"Mean Correlation Value: {np.mean(cc_residual_data_B):.6f}")
+print(f"Max Peak Correlation  : {np.max(cc_residual_data_B):.6f}")
+
+
