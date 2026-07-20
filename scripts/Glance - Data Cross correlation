@@ -1,0 +1,58 @@
+# glance data cc
+
+
+
+
+from glance import waveassister
+import sys
+import numpy as np
+import matplotlib.pyplot as plt
+from gwpy.timeseries import TimeSeries
+
+
+
+gps_A = 1265202095.95 # GW200208_130117
+gps_B = 1265754805.00 # GW200214_223307
+
+
+file_path_Event_A = '/content/H-H1_GWOSC_O3b_4KHZ_R1-1265201152-4096.hdf5'
+file_path_Event_B = '/content/H-H1_GWOSC_O3b_4KHZ_R1-1265754112-4096.hdf5'
+
+
+
+data_event1= waveassister.strain_define([file_path_Event_A])
+data_event2= waveassister.strain_define([file_path_Event_B])
+
+
+data_A = data_event1['H']['strain']
+data_B= data_event2['H']['strain']
+
+crop1_A=data_A.crop(gps_A-16,gps_A+16)
+crop1_B=data_B.crop(gps_B-16,gps_B+16)
+
+
+
+clean_A = crop1_A.whiten(fftlength=4, overlap=2, window='hann').bandpass(30, 512)
+clean_B = crop1_B.whiten(fftlength=4, overlap=2, window='hann').bandpass(30, 512)
+
+
+
+# To cross-correlate them, they must be the exact same length.
+# We crop out exactly 0.5 seconds before and 0.5 seconds after their respective GPS times.
+crop_A = clean_A.crop(gps_A - 0.5, gps_A + 0.5)
+crop_B = clean_B.crop(gps_B - 0.5, gps_B + 0.5)
+
+# Extract the raw numpy arrays for the correlator
+array_A = crop_A.value
+array_B = crop_B.value
+
+time1=crop_A.times.value
+time2=crop_B.times.value
+
+
+cc_time, cc_data = correlator.cross_correlator(array_A, array_B,time=time1,steps=16)
+
+
+plt.plot(cc_time,cc_data)
+print (cc_data)
+print(np.mean(cc_data))
