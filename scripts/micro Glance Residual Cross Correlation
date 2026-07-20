@@ -1,0 +1,186 @@
+# micro glance residual CC 
+
+
+
+import sys
+import os
+import h5py
+import numpy as np
+import matplotlib.pyplot as plt
+from gwpy.timeseries import TimeSeries
+from pesummary.io import read
+
+sys.path.append('/content/glance')
+from glance import correlator
+from glance.generator import waveform_builder
+from glance.waveassister import strain_define
+from glance.waveassister import waveform_extender
+from glance.waveassister import residual_definer
+from pycbc.detector import Detector
+gps_B = 1264333383.11
+
+strain_paths = [
+    '/content/H-H1_GWOSC_O3b_4KHZ_R1-1264332800-4096.hdf5',
+    '/content/L-L1_GWOSC_O3b_4KHZ_R1-1264332800-4096.hdf5'
+]
+
+data_dict = strain_define(strain_paths) # Keys will be 'H' and 'L'
+
+
+data = read("/content/GW200129_114245_result.json")
+samples = data.samples_dict
+
+maxL_idx = np.argmax(samples['log_likelihood'])
+time_best = samples['geocent_time'][maxL_idx]
+ra_best = samples['ra'][maxL_idx]
+dec_best = samples['dec'][maxL_idx]
+print(f"Max Likelihood Geocent Time: {time_best:.4f}")
+
+
+args = {'approximant': 'IMRPhenomXPHM', 'delta_t': 1.0/4096, 'f_low': 10.0, 'f_ref': 10.0}
+raw_waveform = waveform_builder(samples, args)
+# raw_waveform has keys 'H' and 'L'
+det_h1 = Detector("H1")
+det_l1 = Detector("L1")
+
+
+dt_h1 = det_h1.time_delay_from_earth_center(ra_best, dec_best, time_best)
+time_h1 = time_best + dt_h1
+print(f"L1 travel-time delay: {dt_h1*1000:.3f} ms (Arrival time: {time_h1:.4f})")
+
+dt_l1 = det_l1.time_delay_from_earth_center(ra_best, dec_best, time_best)
+time_l1 = time_best + dt_l1
+print(f"L1 travel-time delay: {dt_l1*1000:.3f} ms (Arrival time: {time_l1:.4f})")
+
+extended_waveforms = {
+    'H': waveform_extender(raw_waveform, data_dict, 'H'),
+    'L': waveform_extender(raw_waveform, data_dict, 'L')
+}
+
+
+res_H = residual_definer(extended_waveforms, data_dict, 'H', duration=8.0, f_low=10.0, max_l_time=time_h1)
+res_L = residual_definer(extended_waveforms, data_dict, 'L', duration=8.0, f_low=10.0, max_l_time=time_l1)
+
+
+clean_H = res_H.whiten(fftlength=2, overlap=1, window='hann').bandpass(20, 512)
+clean_L = res_L.whiten(fftlength=2, overlap=1, window='hann').bandpass(20, 512)
+
+# Geometric alignment (Time-Delay shift)
+#correlation = np.correlate(clean_H.value, clean_L.value, mode='full')
+#lag = np.argmax(correlation) - (len(clean_L.value) - 1)
+#clean_L_aligned = TimeSeries(np.roll(clean_L.value, lag), times=clean_L.times)
+
+# Crop tightly around merger for the final correlator run
+#final_H = clean_H.crop(gps_B - 0.5, gps_B + 0.5)
+#final_L = clean_L_aligned.crop(gps_B - 0.5, gps_B + 0.5)
+
+
+
+# ill try wihtout this lag thingy
+
+final_H = clean_H.crop(gps_B - 0.5, gps_B + 0.5)
+final_L = clean_L.crop(gps_B - 0.5, gps_B + 0.5)
+
+
+steps = 16
+cc_time, cc_data = correlator.cross_correlator(
+    final_H.value, final_L.value, time=final_H.times.value, steps=steps
+)
+
+
+
+fig, axes = plt.subplots(1, 4, figsize=(24, 5))
+
+
+idx_H1 = np.argmin(abs(time_best - 4.0 - np.array(data_dict['H']['strain'].times)))
+idx_H2 = np.argmin(abs(time_best + 4.0 - np.array(data_dict['H']['strain'].times)))
+
+raw_data_slice_H = data_dict['H']['strain'][int(idx_H1):int(idx_H2)]
+raw_model_slice_H = extended_waveforms['H'][int(idx_H1):int(idx_H2)]
+
+#  H1 arrays
+plot_data_H_whitened = raw_data_slice_H.whiten(fftlength=2, overlap=1).bandpass(20, 512).crop(gps_B - 0.5, gps_B + 0.5)
+plot_res_H_whitened = final_H
+plot_model_H_raw = raw_model_slice_H.bandpass(40, 400).crop(gps_B - 0.5, gps_B + 0.5) # Unwhitened, bandpassed only
+
+# Left axis: Whitened Data and Residual
+axes[0].plot(plot_data_H_whitened.times.value, plot_data_H_whitened.value, color='yellow', label="Data (Whitened, 20-512Hz)")
+axes[0].plot(plot_res_H_whitened.times.value, plot_res_H_whitened.value, color='red', alpha=0.7, label="Residual (Whitened)")
+axes[0].set_ylabel("Whitened Strain (Data & Res)")
+axes[0].set_xlabel("GPS Time (s)")
+axes[0].axvline(gps_B, color='black', linestyle='--', label='Merger Time')
+axes[0].grid(True, alpha=0.3)
+
+# Right axis: Unwhitened Model
+ax0_right = axes[0].twinx()
+ax0_right.plot(plot_model_H_raw.times.value, plot_model_H_raw.value, color='blue', alpha=0.8, label="Model (Unwhitened, 40-400Hz)")
+ax0_right.set_ylabel("Model", color='blue')
+ax0_right.tick_params(axis='y', labelcolor='blue')
+
+# Merging legends
+h1, l1 = axes[0].get_legend_handles_labels()
+h2, l2 = ax0_right.get_legend_handles_labels()
+axes[0].legend(h1+h2, l1+l2, loc="upper left", fontsize=8)
+axes[0].set_title("Hanford (H1)", fontweight='bold', fontsize=12)
+
+
+# Plot 2: Livingston (L1)
+
+idx_L1 = np.argmin(abs(time_best - 4.0 - np.array(data_dict['L']['strain'].times)))
+idx_L2 = np.argmin(abs(time_best + 4.0 - np.array(data_dict['L']['strain'].times)))
+
+raw_data_slice_L = data_dict['L']['strain'][int(idx_L1):int(idx_L2)]
+raw_model_slice_L = extended_waveforms['L'][int(idx_L1):int(idx_L2)]
+
+
+plot_data_L_whitened = raw_data_slice_L.whiten(fftlength=2, overlap=1).bandpass(20, 512).crop(gps_B - 0.5, gps_B + 0.5)
+plot_res_L_whitened = final_L
+plot_model_L_raw = raw_model_slice_L.bandpass(40, 400).crop(gps_B - 0.5, gps_B + 0.5) # Unwhitened, bandpassed only
+
+# Left axis: Whitened Data and Residual
+axes[1].plot(plot_data_L_whitened.times.value, plot_data_L_whitened.value, color='yellow', label="Data (Whitened, 20-512Hz)")
+axes[1].plot(plot_res_L_whitened.times.value, plot_res_L_whitened.value, color='red', alpha=0.7, label="Residual (Whitened)")
+axes[1].set_ylabel("Whitened Strain (Data & Res)")
+axes[1].set_xlabel("GPS Time (s)")
+axes[1].axvline(gps_B, color='black', linestyle='--', label='Merger Time')
+axes[1].grid(True, alpha=0.3)
+
+# Right axis: Unwhitened Model
+ax1_right = axes[1].twinx()
+ax1_right.plot(plot_model_L_raw.times.value, plot_model_L_raw.value, color='blue', alpha=0.8, label="Model (Unwhitened, 40-400Hz)")
+ax1_right.set_ylabel("Model", color='blue')
+ax1_right.tick_params(axis='y', labelcolor='blue')
+
+
+h1_L, l1_L = axes[1].get_legend_handles_labels()
+h2_L, l2_L = ax1_right.get_legend_handles_labels()
+axes[1].legend(h1_L+h2_L, l1_L+l2_L, loc="upper left", fontsize=8)
+axes[1].set_title("Livingston (L1)", fontweight='bold', fontsize=12)
+
+
+# Plot 3: Both Whitened Residuals
+
+axes[2].plot(final_H.times.value, final_H.value, color='red', alpha=0.7, label="H1 Residual")
+axes[2].plot(final_L.times.value, final_L.value, color='green', alpha=0.7, label="L1 Residual")
+axes[2].set_title(r'Whitened $\mu$-GLANCE Residuals', fontsize=12, fontweight='bold')
+axes[2].set_xlabel("GPS Time (s)")
+axes[2].set_ylabel("Whitened Strain")
+axes[2].axvline(gps_B, color='black', linestyle='--', label='Merger Time')
+axes[2].legend(loc="upper left", fontsize=8)
+axes[2].grid(True, alpha=0.3)
+
+
+# Plot 4: Cross-Correlation
+
+axes[3].plot(cc_time, cc_data, color='purple', marker='o', linewidth=2, label="CC")
+axes[3].set_title(f'Cross-Correlation ({steps} Steps)', fontsize=12, fontweight='bold')
+axes[3].set_xlabel('GPS Time (s)')
+axes[3].set_ylabel('Correlation')
+axes[3].axvline(gps_B, color='black', linestyle='--')
+axes[3].grid(True, alpha=0.3)
+axes[3].legend(loc="upper left", fontsize=8)
+
+plt.tight_layout()
+plt.show()
+print(f"Mean Correlation Value: {np.mean(cc_data):.6f}")
+print(f"Max Peak Correlation  : {np.max(cc_data):.6f}")
