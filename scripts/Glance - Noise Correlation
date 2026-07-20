@@ -1,0 +1,91 @@
+# glance noise cc
+
+
+
+import sys
+import numpy as np
+import matplotlib.pyplot as plt
+from gwpy.timeseries import TimeSeries
+
+sys.path.append('/content/glance')
+
+from glance import correlator
+from glance import toolbox
+
+
+gps_A = 1265202095.95 # GW200208_130117
+gps_B = 1265754805.00 # GW200214_223307
+
+file_path_Event_A = '/content/H-H1_GWOSC_O3b_4KHZ_R1-1265201152-4096.hdf5'
+file_path_Event_B = '/content/H-H1_GWOSC_O3b_4KHZ_R1-1265754112-4096.hdf5'
+
+
+data_A = data_event1['H']['strain']
+data_B= data_event2['H']['strain']
+
+all_cross_correlations = []
+
+for i in range(1, 51):
+
+    shift_start = 16 + (i * 32)
+    shift_end = 16 + ((i - 1) * 32)
+
+    start_A = gps_A - shift_start
+    end_A = gps_A - shift_end
+    start_B = gps_B - shift_start
+    end_B = gps_B - shift_end
+
+    # Safety check to prevent running past the file boundaries
+    if start_A < data_A.t0.value or start_B < data_B.t0.value:
+        print(f"\n[!] WARNING: Ran out of data at iteration {i}. Stopping loop early to prevent crash.")
+        break
+
+    # Crop and condition the 32-second chunk
+    crop2_A = data_A.crop(start_A, end_A)
+    crop2_B = data_B.crop(start_B, end_B)
+
+    clean_A = crop2_A.whiten(fftlength=4, overlap=2, window='hann').bandpass(30, 512)
+    clean_B = crop2_B.whiten(fftlength=4, overlap=2, window='hann').bandpass(30, 512)
+
+    # Grab the 1-second window from the dead center
+    midpoint_A = (start_A + end_A) / 2
+    midpoint_B = (start_B + end_B) / 2
+
+    crop_A_1sec = clean_A.crop(midpoint_A - 0.5, midpoint_A + 0.5)
+    crop_B_1sec = clean_B.crop(midpoint_B - 0.5, midpoint_B + 0.5)
+
+    array_A = crop_A_1sec.value
+    array_B = crop_B_1sec.value
+    time1 = crop_A_1sec.times.value
+
+    cc_time, cc_noise = correlator.cross_correlator(array_A, array_B, time=time1, steps=16, pearson=True)
+
+    all_cross_correlations.append(cc_data)
+
+    # Print & Plot only the first 2 iterations
+    if i <= 2:
+        print(f"\n--- Iteration {i} ---")
+        print(f"Noise Chunk   : {shift_start}s to {shift_end}s before merger")
+
+        plt.figure(figsize=(10, 3))
+        plt.plot(cc_time, cc_data, color='purple', marker='o', linewidth=1.5)
+        plt.title(f'Iteration {i}: Background Noise Correlation', fontweight='bold')
+        plt.ylabel('Correlation')
+        plt.xlabel('GPS Time (s)')
+        #plt.grid(True, alpha=0.3)
+        plt.show()
+
+
+
+# Flatten the list of arrays into a single 1D numpy array containing all points
+master_cc_array = np.concatenate(all_cross_correlations)
+
+
+noise_mean = np.mean(master_cc_array)
+noise_std = np.std(master_cc_array, ddof=1) # ddof=1 provides the unbiased sample standard deviation
+
+
+print(f"Total iterations successfully processed : {len(all_cross_correlations)}")
+print(f"Total individual correlation points     : {len(master_cc_array)}")
+print(f"Background Correlation Mean             : {noise_mean:.6f}")
+print(f"Background Standard Deviation (\u03c3)       : {noise_std:.6f}")
