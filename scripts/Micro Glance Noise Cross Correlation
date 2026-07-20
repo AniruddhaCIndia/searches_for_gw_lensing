@@ -1,0 +1,88 @@
+# micro glance noise CC 
+
+
+import sys
+import numpy as np
+import matplotlib.pyplot as plt
+from gwpy.timeseries import TimeSeries
+
+sys.path.append('/content/glance')
+
+from glance import correlator
+from glance import toolbox
+
+gps_B =1239198206.74
+
+file_path_Event_B_H = '/content/H-H1_GWOSC_O3a_4KHZ_R1-1239195648-4096.hdf5'
+file_path_Event_B_L = '/content/L-L1_GWOSC_O3a_4KHZ_R1-1239195648-4096.hdf5'
+
+
+data_B_H = TimeSeries.read(file_path_Event_B_H, format='hdf5.gwosc')
+data_B_L = TimeSeries.read(file_path_Event_B_L, format='hdf5.gwosc')
+
+
+all_cross_correlations = []
+
+for i in range(1, 51):
+
+    shift_start = 16 + (i * 32)
+    shift_end = 16 + ((i - 1) * 32)
+
+    start_B_H = gps_B - shift_start
+    end_B_H = gps_B - shift_end
+    start_B_L = gps_B - shift_start
+    end_B_L = gps_B - shift_end
+
+    # Safety check to prevent running past the file boundaries
+    if start_B_H < data_B_H.t0.value or start_B_L < data_B_L.t0.value:
+        print(f"\n[!] WARNING: Ran out of data at iteration {i}. Stopping loop early.")
+        break
+
+    # Crop out the 32-second chunk
+    crop2_B_H = data_B_H.crop(start_B_H, end_B_H)
+    crop2_B_L = data_B_L.crop(start_B_L, end_B_L)
+
+
+    clean_A = crop2_B_H.whiten(fftlength=4, overlap=2, window='hann').bandpass(20, 512)
+    clean_B = crop2_B_L.whiten(fftlength=4, overlap=2, window='hann').bandpass(20, 512)
+
+    # Grab the 1-second window from the dead center
+    midpoint_A = (start_B_H + end_B_H) / 2
+    midpoint_B = (start_B_L + end_B_L) / 2
+
+    crop_A_1sec = clean_A.crop(midpoint_A - 0.5, midpoint_A + 0.5)
+    crop_B_1sec = clean_B.crop(midpoint_B - 0.5, midpoint_B + 0.5)
+
+    array_A = crop_A_1sec.value
+    array_B = crop_B_1sec.value
+    time1 = crop_A_1sec.times.value
+
+    cc_time_B, cc_noise_B = correlator.cross_correlator(array_A, array_B, time=time1, steps=16, pearson=True)
+
+    all_cross_correlations.append(cc_noise_B)
+
+    # Print & Plot only the first 2 iterations
+    if i <= 2:
+        print(f"\n--- Iteration {i} ---")
+        print(f"Noise Chunk   : {shift_start}s to {shift_end}s before merger")
+
+        plt.figure(figsize=(10, 3))
+        plt.plot(cc_time_B, cc_noise_B, color='purple', marker='o', linewidth=1.5)
+        plt.title(f'Iteration {i}: Background Noise Correlation', fontweight='bold')
+        plt.ylabel('Correlation')
+        plt.xlabel('GPS Time (s)')
+        plt.show()
+
+print("\nLoop execution complete!")
+
+
+# Flatten the list of arrays into a single 1D numpy array containing all points
+master_cc_array_B = np.concatenate(all_cross_correlations)
+
+noise_mean_B = np.mean(master_cc_array_B)
+noise_std_B = np.std(master_cc_array_B, ddof=1)
+
+print(f"Total iterations successfully processed : {len(all_cross_correlations)}")
+print(f"Total individual correlation points     : {len(master_cc_array_B)}")
+print(f"Background Correlation Mean             : {noise_mean_B:.6f}")
+print(f"Background Standard Deviation (\u03c3)       : {noise_std_B:.6f}")
